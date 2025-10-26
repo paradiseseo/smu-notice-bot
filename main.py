@@ -129,14 +129,17 @@ def send_discord(item):
     else:
         r.raise_for_status()
 
+print(f"[DEBUG] Parsing list from: {LIST_URL}")
 def main():
     seen = load_seen()
     items = fetch_list_items()
+    print(f"[DEBUG] Fetched items: {len(items)}")
 
     # 최신글이 위에 있다고 가정 → 뒤에서 앞으로 보내면 오래된 것부터 전송됨
     items = list(items)
 
     new_items = [it for it in items if it["id"] not in seen and match_keywords(it["title"])]
+    print(f"[DEBUG] New items: {len(new_items)} (seen={len(seen)})")
     if not new_items:
         print("새 공지 없음")
         return
