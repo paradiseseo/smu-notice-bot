@@ -1,0 +1,14 @@
+name: ping-webhook
+on:
+  workflow_dispatch: {}
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send test message to Discord
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          curl -X POST -H "Content-Type: application/json" \
+            -d '{"content":"✅ Webhook 연결 테스트: 안녕하세요! (ping)"}' \
+            "$DISCORD_WEBHOOK_URL"
