@@ -9,14 +9,6 @@ LIST_URL = "https://www.smu.ac.kr/kor/life/notice.do"
 USER_AGENT = "Mozilla/5.0 (compatible; smu-notice-bot/1.0; +https://www.smu.ac.kr)"
 TIMEOUT = 20
 
-def send_test():
-    import requests
-    requests.post(WEBHOOK_URL, json={"content":"🧪 FORCE_SEND 테스트"}, timeout=TIMEOUT)
-
-if os.environ.get("FORCE_SEND") == "1":
-    print("[DEBUG] FORCE_SEND=1 → 테스트 메시지 전송")
-    send_test()
-
 STATE_PATH = "state.json"
 MAX_SEND_PER_RUN = 10      # 1회 실행 시 최대 전송 개수 (스팸 방지)
 KEYWORDS = [               # (선택) 필터링 키워드 — 초기에는 모두 전송하려면 빈 리스트로 두세요.
@@ -26,6 +18,14 @@ KEYWORDS = [               # (선택) 필터링 키워드 — 초기에는 모�
 WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
 if not WEBHOOK_URL:
     raise SystemExit("환경변수 DISCORD_WEBHOOK_URL 이 설정되지 않았습니다.")
+
+def send_test():
+    import requests
+    requests.post(WEBHOOK_URL, json={"content":"🧪 FORCE_SEND 테스트"}, timeout=TIMEOUT)
+
+if os.environ.get("FORCE_SEND") == "1":
+    print("[DEBUG] FORCE_SEND=1 → 테스트 메시지 전송")
+    send_test()
 
 def load_seen():
     try:
