@@ -18,7 +18,6 @@ jobs:
       - name: Run crawler
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          FORCE_SEND: "1"
         run: python main.py
       - name: Persist state
         uses: stefanzweifel/git-auto-commit-action@v5
