@@ -81,82 +81,109 @@ def match_keywords(title: str) -> bool:
 
 def fetch_list_items():
     """
-    상명대 통합공지: 다양한 마크업/경로를 가정하고 3단계로 긁음.
+    상명대 통합공지 전용 파서:
+    - 실제 게시글 링크만: /kor/life/notice.do?mode=view&articleNo=...
+    - 내비/목록 루트 링크(통합공지/대학생활)는 자동 배제
+    - 날짜는 같은 행(tr)/인접 블록에서 yyyy.mm.dd 패턴 탐색
     반환: [{id, title, url, date}]
     """
-    from bs4 import BeautifulSoup
     import re
+    from bs4 import BeautifulSoup
     from urllib.parse import urljoin, urlparse, parse_qs
 
     resp = http_get(LIST_URL)
     resp.raise_for_status()
     html = resp.text
-
-    # HTML 앞부분 찍어서 진짜 내용이 들어오는지 확인 (디버그용)
-    print("[DEBUG] HTML head snippet:", html[:800].replace("\n"," ")[:800])
-
     soup = BeautifulSoup(html, "html.parser")
+
     items = []
+    date_pat = re.compile(r"\d{4}[.\-\/]\d{1,2}[.\-\/]\d{1,2}")
 
-    BASE_PATHS = [
-        "/kor/life/notice.do",         # 목록/상세 공통 경로 가능
-        "/kor/life/noticeView.do",     # 대체 상세 경로 가능성
-        "/kor/life/notice.jsp",        # 레거시 가능성
-    ]
+    def is_notice_view_href(href: str) -> bool:
+        if not href:
+            return False
+        full = urljoin(BASE, href)
+        # 목록 루트는 제외
+        if full.split("?")[0].rstrip("/") == LIST_URL.rstrip("/"):
+            return False
+        # 반드시 mode=view & articleNo= 포함
+        if ("/kor/life/notice.do" in full) and ("mode=view" in full) and ("articleNo=" in full):
+            return True
+        return False
 
-    def mk_id(href):
-        try:
-            qs = parse_qs(urlparse(href).query)
-            for k in ("articleNo", "no", "bbsNo", "nttNo"):
-                if k in qs and qs[k]:
-                    return f"{k}:{qs[k][0]}"
-        except Exception:
-            pass
-        return "hash:" + hashlib.sha1(href.encode("utf-8")).hexdigest()[:16]
+    def extract_article_no(href: str) -> str:
+        qs = parse_qs(urlparse(urljoin(BASE, href)).query)
+        if "articleNo" in qs and qs["articleNo"]:
+            return qs["articleNo"][0]
+        return None
 
-    # --- 전략 A: 테이블 기반
-    rows = soup.select("table.board-list tbody tr") or soup.select("table tbody tr")
-    for r in rows:
-        a = r.select_one("a[href]")
-        if not a:
+    # 1) a[href*="notice.do"][href*="mode=view"][href*="articleNo="] 만 수집
+    anchors = soup.select('a[href*="notice.do"][href*="mode=view"][href*="articleNo="]')
+    for a in anchors:
+        href = a.get("href", "")
+        if not is_notice_view_href(href):
             continue
-        href = urljoin(BASE, a.get("href"))
-        if not any(path in href for path in BASE_PATHS):
-            continue
+
+        full = urljoin(BASE, href)
+        art_no = extract_article_no(href)
+        if not art_no:
+            continue  # articleNo가 없는 경우 스킵
+
+        # 제목 추출
         title = a.get_text(strip=True)
-        date_el = r.select_one(".date, td:nth-last-child(1), time")
-        date_text = date_el.get_text(strip=True) if date_el else ""
-        items.append({"id": mk_id(href), "title": title, "url": href, "date": date_text})
 
-    if items:
-        return items
+        # 게시판이 테이블이면 같은 tr에서 날짜 찾기
+        date_text = ""
+        tr = a.find_parent("tr")
+        if tr:
+            # 뒤쪽 td부터 날짜 형태 탐색
+            for td in reversed(tr.find_all("td")):
+                txt = td.get_text(" ", strip=True)
+                m = date_pat.search(txt)
+                if m:
+                    date_text = m.group(0)
+                    break
 
-    # --- 전략 B: 카드/리스트형
-    for sel in ["ul.board-list li a[href]", "ul li a[href]", ".board-list a[href]", ".list a[href]", "a[href]"]:
-        for a in soup.select(sel):
-            href = urljoin(BASE, a.get("href"))
-            if not any(path in href for path in BASE_PATHS):
-                continue
-            title = a.get_text(strip=True)
-            if not title:
-                continue
-            parent = a.find_parent(["li","div","tr"]) or a.parent
-            date_el = (parent.select_one(".date, .regdate, time") if parent else None)
-            date_text = date_el.get_text(strip=True) if date_el else ""
-            items.append({"id": mk_id(href), "title": title, "url": href, "date": date_text})
+        # 리스트/카드형이면 주변에서 날짜 후보 찾기
+        if not date_text:
+            parent = a.find_parent(["li", "div"]) or a.parent
+            if parent:
+                # class로 흔히 쓰이는 것들
+                cand = parent.select_one(".date, .regdate, time")
+                if cand:
+                    date_text = cand.get_text(strip=True)
+                else:
+                    # 텍스트에서 패턴 탐색
+                    m = date_pat.search(parent.get_text(" ", strip=True))
+                    if m:
+                        date_text = m.group(0)
 
-    if items:
-        return items
+        items.append({
+            "id": f"articleNo:{art_no}",
+            "title": title if title else f"articleNo {art_no}",
+            "url": full,
+            "date": date_text
+        })
 
-    # --- 전략 C: 정규식으로 href 직접 수집(최후수단)
-    hrefs = re.findall(r'href=["\']([^"\']+)["\']', html, flags=re.I)
-    for h in hrefs:
-        full = urljoin(BASE, h)
-        if any(path in full for path in BASE_PATHS):
-            title = full.split("title=")[-1] if "title=" in full else full
-            items.append({"id": mk_id(full), "title": title, "url": full, "date": ""})
+    # 중복 제거(같은 articleNo는 하나만)
+    dedup = {}
+    for it in items:
+        dedup[it["id"]] = it
 
-    return items
+    # 원래 목록 순서 보장: anchors 순회 순서 유지
+    ordered = []
+    seen_ids = set()
+    for a in anchors:
+        href = a.get("href", "")
+        art_no = extract_article_no(href)
+        if not art_no:
+            continue
+        key = f"articleNo:{art_no}"
+        if key in dedup and key not in seen_ids:
+            ordered.append(dedup[key])
+            seen_ids.add(key)
+
+    return ordered
 
 def send_discord(item):
     tag = guess_category(item["title"])
@@ -184,6 +211,7 @@ def main():
 
     # [2] 실제 HTML 파싱 후 몇 개 항목을 찾았는지 표시
     items = fetch_list_items()
+    
     print(f"[DEBUG] Fetched items: {len(items)}")
 
     items = list(items)
