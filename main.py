@@ -67,20 +67,6 @@ def extract_id_from_url(href: str) -> str:
         pass
     return "hash:" + hashlib.sha1(href.encode("utf-8")).hexdigest()[:16]
 
-def guess_category(title: str) -> str:
-    cats = [
-        ("[장학]", r"장학|scholar"),
-        ("[학사]", r"수강|휴학|복학|등록|학점|성적|졸업|학사|수업"),
-        ("[채용]", r"채용|인턴|모집"),
-        ("[행사]", r"행사|설명회|세미나|특강|박람회"),
-        ("[공모전]", r"공모전|대회|콘테스트|챌린지"),
-        ("[공지]", r".*"),  # fallback
-    ]
-    for tag, pattern in cats:
-        if re.search(pattern, title, flags=re.I):
-            return tag
-    return "[공지]"
-
 def clean_title(raw: str) -> str:
     """'통합공지 게시판읽기(...)' 같은 공통 프리픽스 제거 + 괄호 내용만 추출"""
     t = (raw or "").strip()
@@ -228,17 +214,28 @@ def fetch_list_items():
     return list(dedup.values())
 
 def send_discord(item):
-    # 제목을 먼저 정리하고, 정리된 제목 기준으로 카테고리 추출
+    # 1️⃣ 제목 정리
     base_title = clean_title(item["title"])
-    tag = guess_category(base_title)  # [장학]/[채용]/[행사]/...
 
-    # 원하는 포맷: 📢 **[채용]** [부서] 제목
+    # 2️⃣ 부서명([학생복지팀] 등)을 찾아 굵게(**…**) 표시
+    dept_match = re.match(r'^\[(.*?)\]', base_title)
+    if dept_match:
+        dept_name = dept_match.group(1)
+        base_title = base_title.replace(f"[{dept_name}]", f"**[{dept_name}]**", 1)
+
+    # 3️⃣ 제목이 너무 길면 잘라주기 (가독성)
+    MAX_TITLE = 140
+    if len(base_title) > MAX_TITLE:
+        base_title = base_title[:MAX_TITLE - 1] + "…"
+
+    # 4️⃣ 카드형 메시지 포맷
     content = (
-        f"📢 **{tag}** {base_title}\n"
-        f"게시일: {item['date'] or '미표기'}\n"
-        f"🔗 {item['url']}"
+        f"📢 {base_title}\n"
+        f"📅 **게시일:** {item['date'] or '미표기'}\n"
+        f"🔗 <{item['url']}>"
     )
 
+    # 5️⃣ 디스코드 전송 (레이트 리밋 대응)
     r = requests.post(WEBHOOK_URL, json={"content": content}, timeout=TIMEOUT)
     if r.status_code == 429:
         retry_after = r.json().get("retry_after", 2)
