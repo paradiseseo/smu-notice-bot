@@ -6,6 +6,13 @@ from bs4 import BeautifulSoup
 
 BASE = "https://www.smu.ac.kr"
 LIST_URL = "https://www.smu.ac.kr/kor/life/notice.do"
+# 목록을 안정적으로 보여주는 쿼리 셋(캠퍼스/기간/상단공지 포함)
+LIST_URL_WITH_PARAMS = (
+    LIST_URL
+    + "?srCampus=smu&srUpperNoticeYn=on"
+    + "&srStartDt=2024-03-01&srEndDt=2026-02-28"
+    + "&article.offset=0&articleLimit=10"
+)
 USER_AGENT = "Mozilla/5.0 (compatible; smu-notice-bot/1.0; +https://www.smu.ac.kr)"
 TIMEOUT = 20
 
@@ -81,109 +88,89 @@ def match_keywords(title: str) -> bool:
 
 def fetch_list_items():
     """
-    상명대 통합공지 전용 파서(강화판)
-    - 제목 a 태그의 href 또는 onclick에서 articleNo를 추출
-    - href=...mode=view&articleNo=... 이면 그대로 사용
-    - href="#" 이고 onclick="fnView('760387')" 등인 경우 숫자 추출 후 URL 구성
-    - 날짜는 같은 tr/인접 블록에서 yyyy.mm.dd, yyyy-mm-dd, yyyy/mm/dd 패턴 탐색
+    목록 HTML에서 articleNo를 정규식으로 수집하고,
+    각 상세 페이지(/kor/life/notice.do?mode=view&articleNo=...)로 들어가
+    제목/날짜를 파싱한다.
     반환: [{id, title, url, date}]
     """
     import re
     from bs4 import BeautifulSoup
-    from urllib.parse import urljoin, urlparse, parse_qs
+    from urllib.parse import urljoin
 
-    resp = http_get(LIST_URL)
+    # 1) 목록 HTML 받기 (파라미터 포함 버전 사용)
+    resp = http_get(LIST_URL_WITH_PARAMS, headers={
+        "Referer": LIST_URL,
+        "Accept-Language": "ko,en;q=0.8",
+    })
     resp.raise_for_status()
     html = resp.text
-    soup = BeautifulSoup(html, "html.parser")
+
+    # 2) 목록 HTML에서 articleNo 수집 (href, onclick 모두 커버)
+    #   - href="?mode=view&articleNo=760385" 형태
+    #   - onclick="fnView('760385')" 형태
+    artnos = set(re.findall(r"articleNo=(\d+)", html))
+    artnos.update(re.findall(r"fnView\(['\"]?(\d{5,})['\"]?\)", html))
+    found = sorted(artnos, reverse=True)[:10]  # 최신 몇 건만
+
+    print(f"[DEBUG] articleNo candidates: {found}")
 
     items = []
     date_pat = re.compile(r"\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}")
 
-    def extract_article_no_from_href(href: str):
-        if not href:
-            return None
-        qs = parse_qs(urlparse(urljoin(BASE, href)).query)
-        if "articleNo" in qs and qs["articleNo"]:
-            return qs["articleNo"][0]
-        return None
+    # 3) 각 상세 페이지에서 제목/날짜 파싱
+    for no in found:
+        view_url = f"{LIST_URL}?mode=view&articleNo={no}"
 
-    def extract_article_no_from_onclick(attr: str):
-        if not attr:
-            return None
-        # fnView('760387') / goView(760387) / view( '760387' ) 등 숫자 6자리 이상
-        m = re.search(r"(?<!\d)(\d{5,})(?!\d)", attr)
-        return m.group(1) if m else None
-
-    def build_view_url(article_no: str):
-        # 목록에서 쓰던 기본 파라미터는 없어도 상세는 열립니다. 최소 구성으로 생성
-        return f"{LIST_URL}?mode=view&articleNo={article_no}"
-
-    # 제목이 들어있는 앵커 후보 넓게 수집 (게시판 영역 우선)
-    # 테이블/리스트 모두 커버: 제목 텍스트가 2글자 이상인 a 태그
-    anchors = soup.select("table a[href], table a[onclick], .board-list a, a")
-    for a in anchors:
-        title = a.get_text(strip=True)
-        if not title or len(title) < 2:
+        try:
+            d = http_get(view_url, headers={
+                "Referer": LIST_URL_WITH_PARAMS,
+                "Accept-Language": "ko,en;q=0.8",
+            })
+            d.raise_for_status()
+        except Exception as e:
+            print(f"[DEBUG] detail fetch failed for {no}: {e}")
             continue
 
-        href = a.get("href") or ""
-        onclick = a.get("onclick") or ""
+        dsoup = BeautifulSoup(d.text, "html.parser")
 
-        # 1) href에서 articleNo 추출
-        art_no = extract_article_no_from_href(href)
+        # 제목 후보: 상세 상단의 제목 요소들(사이트 구조에 따라 유연하게)
+        title = (
+            (dsoup.select_one(".board_view .title") or
+             dsoup.select_one(".boardView .title") or
+             dsoup.select_one("h3, h2, .title"))
+        )
+        title_text = title.get_text(strip=True) if title else ""
 
-        # 2) href가 없거나 '#'이고, onclick에 숫자가 있으면 추출
-        if not art_no and (href in ("", "#", "javascript:void(0)", "javascript:;") or "mode=view" not in href):
-            art_no = extract_article_no_from_onclick(onclick)
-
-        # articleNo가 없으면 게시글로 보지 않음
-        if not art_no:
-            continue
-
-        full = build_view_url(art_no)
-
-        # 날짜 추출: 같은 tr 우선, 없으면 부모 블록들에서 검색
+        # 날짜 후보: 상세 메타 영역, time태그, 라벨-값 테이블 등
         date_text = ""
-        tr = a.find_parent("tr")
-        if tr:
-            for td in reversed(tr.find_all("td")):
-                txt = td.get_text(" ", strip=True)
-                m = date_pat.search(txt)
-                if m:
-                    date_text = m.group(0)
-                    break
+        meta = dsoup.select_one(".date, .regdate, time, .write, .info")
+        if meta:
+            date_text = meta.get_text(" ", strip=True)
+            m = date_pat.search(date_text)
+            if m:
+                date_text = m.group(0)
         if not date_text:
-            parent = a.find_parent(["li", "div", "article", "section"]) or a.parent
-            if parent:
-                cand = parent.select_one(".date, .regdate, time")
-                if cand:
-                    date_text = cand.get_text(strip=True)
-                else:
-                    m = date_pat.search(parent.get_text(" ", strip=True))
-                    if m:
-                        date_text = m.group(0)
+            # 본문에서 패턴으로 스캔(최후수단)
+            m = date_pat.search(dsoup.get_text(" ", strip=True))
+            if m:
+                date_text = m.group(0)
+
+        # 제목이 비어 있으면 URL로 대체(방어)
+        if not title_text:
+            title_text = f"articleNo {no}"
 
         items.append({
-            "id": f"articleNo:{art_no}",
-            "title": title,
-            "url": full,
+            "id": f"articleNo:{no}",
+            "title": title_text,
+            "url": view_url,
             "date": date_text
         })
 
-    # 메뉴/중복 제거: articleNo 기준으로 dedup
+    # 중복 제거
     dedup = {}
     for it in items:
-        # 목록 루트(자기 자신)나 메뉴 텍스트(대학생활/통합공지) 필터
-        if it["url"].split("?")[0].rstrip("/") == LIST_URL.rstrip("/"):
-            continue
-        if it["title"] in ("대학생활", "통합공지"):
-            continue
         dedup[it["id"]] = it
-
-    # 원래 화면 순서 근사 유지
-    ordered = list(dedup.values())
-    return ordered
+    return list(dedup.values())
 
 def send_discord(item):
     tag = guess_category(item["title"])
