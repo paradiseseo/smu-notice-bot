@@ -91,18 +91,20 @@ def fetch_list_items():
     resp = http_get(LIST_URL)
     resp.raise_for_status()
     html = resp.text
+
+    # HTML 앞부분 찍어서 진짜 내용이 들어오는지 확인 (디버그용)
     print("[DEBUG] HTML head snippet:", html[:800].replace("\n"," ")[:800])
+
     soup = BeautifulSoup(html, "html.parser")
     items = []
 
     BASE_PATHS = [
-        "/kor/life/notice.do",         # 현재 우리가 보는 목록/상세 공통 경로
+        "/kor/life/notice.do",         # 목록/상세 공통 경로 가능
         "/kor/life/noticeView.do",     # 대체 상세 경로 가능성
         "/kor/life/notice.jsp",        # 레거시 가능성
     ]
 
     def mk_id(href):
-        # ?articleNo= / ?no= / ?bbsNo= 등 공통 파라미터 우선
         try:
             qs = parse_qs(urlparse(href).query)
             for k in ("articleNo", "no", "bbsNo", "nttNo"):
@@ -112,11 +114,11 @@ def fetch_list_items():
             pass
         return "hash:" + hashlib.sha1(href.encode("utf-8")).hexdigest()[:16]
 
-    # --- 전략 A: 테이블 기반 (가장 흔함)
-    rows = soup.select("table tbody tr")
+    # --- 전략 A: 테이블 기반
+    rows = soup.select("table.board-list tbody tr") or soup.select("table tbody tr")
     for r in rows:
         a = r.select_one("a[href]")
-        if not a: 
+        if not a:
             continue
         href = urljoin(BASE, a.get("href"))
         if not any(path in href for path in BASE_PATHS):
@@ -129,8 +131,8 @@ def fetch_list_items():
     if items:
         return items
 
-    # --- 전략 B: 카드/리스트형 (ul/li, div.list)
-    for sel in ["ul li a[href]", ".board-list a[href]", ".list a[href]", "a[href]"]:
+    # --- 전략 B: 카드/리스트형
+    for sel in ["ul.board-list li a[href]", "ul li a[href]", ".board-list a[href]", ".list a[href]", "a[href]"]:
         for a in soup.select(sel):
             href = urljoin(BASE, a.get("href"))
             if not any(path in href for path in BASE_PATHS):
@@ -138,7 +140,6 @@ def fetch_list_items():
             title = a.get_text(strip=True)
             if not title:
                 continue
-            # 주변에서 날짜 힌트 찾기
             parent = a.find_parent(["li","div","tr"]) or a.parent
             date_el = (parent.select_one(".date, .regdate, time") if parent else None)
             date_text = date_el.get_text(strip=True) if date_el else ""
@@ -147,17 +148,15 @@ def fetch_list_items():
     if items:
         return items
 
-    # --- 전략 C: HTML 안의 href를 정규식으로 직접 수집(최후수단)
+    # --- 전략 C: 정규식으로 href 직접 수집(최후수단)
     hrefs = re.findall(r'href=["\']([^"\']+)["\']', html, flags=re.I)
     for h in hrefs:
         full = urljoin(BASE, h)
         if any(path in full for path in BASE_PATHS):
-            # 앵커 텍스트를 못 얻으면 URL에서 타이틀 대체
             title = full.split("title=")[-1] if "title=" in full else full
             items.append({"id": mk_id(full), "title": title, "url": full, "date": ""})
 
     return items
-
 
 def send_discord(item):
     tag = guess_category(item["title"])
