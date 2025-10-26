@@ -106,21 +106,70 @@ def fetch_list_items():
     html = resp.text
 
     # 2) 목록 HTML에서 articleNo 수집 (href, onclick 모두 커버)
-    #   - href="?mode=view&articleNo=760385" 형태
-    #   - onclick="fnView('760385')" 형태
     artnos = set(re.findall(r"articleNo=(\d+)", html))
     artnos.update(re.findall(r"fnView\(['\"]?(\d{5,})['\"]?\)", html))
     found = sorted(artnos, reverse=True)[:10]  # 최신 몇 건만
-
     print(f"[DEBUG] articleNo candidates: {found}")
 
     items = []
     date_pat = re.compile(r"\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}")
 
+    # 🔸 상세 제목 추출기 (for 루프 앞에 정의)
+    def extract_title_from_detail(dsoup):
+        BAD_TITLES = {"Calendar", "통합공지", "대학생활", "공지", "게시판"}
+
+        # 1) og:title
+        og = dsoup.select_one('meta[property="og:title"]')
+        if og and og.get("content"):
+            t = og["content"].strip()
+            if t and t not in BAD_TITLES:
+                return t
+
+        # 2) "제목" 라벨 옆 값(th/td, dt/dd)
+        for row in dsoup.select("table tr"):
+            th = row.find("th")
+            if th and "제목" in th.get_text(strip=True):
+                td = row.find("td")
+                if td:
+                    t = td.get_text(" ", strip=True)
+                    if t and t not in BAD_TITLES:
+                        return t
+        for dt in dsoup.select("dt"):
+            if "제목" in dt.get_text(strip=True):
+                dd = dt.find_next("dd")
+                if dd:
+                    t = dd.get_text(" ", strip=True)
+                    if t and t not in BAD_TITLES:
+                        return t
+
+        # 3) 본문 상단 타이틀 후보
+        CANDS = [
+            ".board_view .title", ".boardView .title", ".view_title", ".view-title",
+            ".bbs_view .tit", ".bbs-view .tit", ".post-title", ".board .title",
+            "article h1", "article h2", "#content h1", "#content h2"
+        ]
+        for sel in CANDS:
+            el = dsoup.select_one(sel)
+            if el:
+                t = el.get_text(" ", strip=True)
+                if t and t not in BAD_TITLES and len(t) > 1:
+                    return t
+
+        # 4) <title> fallback
+        page_title = dsoup.title.get_text(" ", strip=True) if dsoup.title else ""
+        if page_title:
+            parts = re.split(r"[|\-·•»«]+", page_title)
+            parts = [p.strip() for p in parts if p.strip()]
+            if parts:
+                parts.sort(key=len, reverse=True)
+                t = parts[0]
+                if t and t not in BAD_TITLES:
+                    return t
+        return ""
+
     # 3) 각 상세 페이지에서 제목/날짜 파싱
     for no in found:
         view_url = f"{LIST_URL}?mode=view&articleNo={no}"
-
         try:
             d = http_get(view_url, headers={
                 "Referer": LIST_URL_WITH_PARAMS,
@@ -132,72 +181,9 @@ def fetch_list_items():
             continue
 
         dsoup = BeautifulSoup(d.text, "html.parser")
-    def extract_title_from_detail(dsoup):
-    import re
-    BAD_TITLES = {"Calendar", "통합공지", "대학생활", "공지", "게시판"}
-
-    # 1) og:title 최우선
-    og = dsoup.select_one('meta[property="og:title"]')
-    if og and og.get("content"):
-        t = og["content"].strip()
-        if t and t not in BAD_TITLES:
-            return t
-
-    # 2) 테이블/정의리스트에서 "제목" 라벨 옆 값 찾기
-    # 2-1) th/td 구조
-    for row in dsoup.select("table tr"):
-        th = row.find("th")
-        if th and "제목" in th.get_text(strip=True):
-            td = row.find("td")
-            if td:
-                t = td.get_text(" ", strip=True)
-                if t and t not in BAD_TITLES:
-                    return t
-    # 2-2) dl/dt/dd 구조
-    for dt in dsoup.select("dt"):
-        if "제목" in dt.get_text(strip=True):
-            dd = dt.find_next("dd")
-            if dd:
-                t = dd.get_text(" ", strip=True)
-                if t and t not in BAD_TITLES:
-                    return t
-
-    # 3) 게시글 본문 상단의 흔한 타이틀 클래스들
-    CANDS = [
-        ".board_view .title", ".boardView .title", ".view_title", ".view-title",
-        ".bbs_view .tit", ".bbs-view .tit", ".post-title", ".board .title",
-        "article h1", "article h2", "#content h1", "#content h2"
-    ]
-    for sel in CANDS:
-        el = dsoup.select_one(sel)
-        if el:
-            t = el.get_text(" ", strip=True)
-            if t and t not in BAD_TITLES and len(t) > 1:
-                return t
-
-    # 4) <title> 태그 fallback (사이트명 잘라내기)
-    page_title = dsoup.title.get_text(" ", strip=True) if dsoup.title else ""
-    if page_title:
-        # 사이트명 구분자 기준으로 가장 '긴 조각'을 제목 후보로
-        parts = re.split(r"[|\-·•»«]+", page_title)
-        parts = [p.strip() for p in parts if p.strip()]
-        if parts:
-            parts.sort(key=len, reverse=True)
-            t = parts[0]
-            if t and t not in BAD_TITLES:
-                return t
-
-    return ""
-
-        # 제목 후보: 상세 상단의 제목 요소들(사이트 구조에 따라 유연하게)
-        title = (
-            (dsoup.select_one(".board_view .title") or
-             dsoup.select_one(".boardView .title") or
-             dsoup.select_one("h3, h2, .title"))
-        )
         title_text = extract_title_from_detail(dsoup)
 
-        # 날짜 후보: 상세 메타 영역, time태그, 라벨-값 테이블 등
+        # 날짜: 메타 영역 우선, 없으면 본문에서 패턴
         date_text = ""
         meta = dsoup.select_one(".date, .regdate, time, .write, .info")
         if meta:
@@ -206,12 +192,10 @@ def fetch_list_items():
             if m:
                 date_text = m.group(0)
         if not date_text:
-            # 본문에서 패턴으로 스캔(최후수단)
             m = date_pat.search(dsoup.get_text(" ", strip=True))
             if m:
                 date_text = m.group(0)
 
-        # 제목이 비어 있으면 URL로 대체(방어)
         if not title_text:
             title_text = f"articleNo {no}"
 
@@ -245,7 +229,6 @@ def send_discord(item):
     else:
         r.raise_for_status()
 
-print(f"[DEBUG] Parsing list from: {LIST_URL}")
 def main():
     seen = load_seen()
 
