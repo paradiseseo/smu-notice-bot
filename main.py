@@ -81,6 +81,21 @@ def guess_category(title: str) -> str:
             return tag
     return "[공지]"
 
+def clean_title(raw: str) -> str:
+    """'통합공지 게시판읽기(...)' 같은 공통 프리픽스 제거 + 괄호 내용만 추출"""
+    t = (raw or "").strip()
+    # 통합공지 게시판읽기 / 게시판 읽기 / 공백 변형 제거
+    t = re.sub(r'^\s*통합공지\s*게시판\s*읽기\s*', '', t)
+    t = re.sub(r'^\s*통합공지\s*게시판읽기\s*', '', t)
+    t = re.sub(r'^\s*\[\s*통합공지\s*\]\s*', '', t)
+    # 전체가 괄호로 둘러싸인 형태면 안쪽만
+    m = re.match(r'^\((.+)\)$', t)
+    if m:
+        t = m.group(1).strip()
+    # 공백 정리
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
 def match_keywords(title: str) -> bool:
     if not KEYWORDS:
         return True
@@ -123,7 +138,7 @@ def fetch_list_items():
         if og and og.get("content"):
             t = og["content"].strip()
             if t and t not in BAD_TITLES:
-                return t
+                return clean_title(t)
 
         # 2) "제목" 라벨 옆 값(th/td, dt/dd)
         for row in dsoup.select("table tr"):
@@ -133,14 +148,14 @@ def fetch_list_items():
                 if td:
                     t = td.get_text(" ", strip=True)
                     if t and t not in BAD_TITLES:
-                        return t
+                        return clean_title(t)
         for dt in dsoup.select("dt"):
             if "제목" in dt.get_text(strip=True):
                 dd = dt.find_next("dd")
                 if dd:
                     t = dd.get_text(" ", strip=True)
                     if t and t not in BAD_TITLES:
-                        return t
+                        return clean_title(t)
 
         # 3) 본문 상단 타이틀 후보
         CANDS = [
@@ -153,7 +168,7 @@ def fetch_list_items():
             if el:
                 t = el.get_text(" ", strip=True)
                 if t and t not in BAD_TITLES and len(t) > 1:
-                    return t
+                    return clean_title(t)
 
         # 4) <title> fallback
         page_title = dsoup.title.get_text(" ", strip=True) if dsoup.title else ""
@@ -164,7 +179,7 @@ def fetch_list_items():
                 parts.sort(key=len, reverse=True)
                 t = parts[0]
                 if t and t not in BAD_TITLES:
-                    return t
+                    return clean_title(t)
         return ""
 
     # 3) 각 상세 페이지에서 제목/날짜 파싱
@@ -213,14 +228,17 @@ def fetch_list_items():
     return list(dedup.values())
 
 def send_discord(item):
-    tag = guess_category(item["title"])
+    # 제목을 먼저 정리하고, 정리된 제목 기준으로 카테고리 추출
+    base_title = clean_title(item["title"])
+    tag = guess_category(base_title)  # [장학]/[채용]/[행사]/...
+
+    # 원하는 포맷: 📢 **[채용]** [부서] 제목
     content = (
-        f"📢 **새 공지** {tag}\n"
-        f"**제목**: {item['title']}\n"
-        f"**게시일**: {item['date'] or '미표기'}\n"
+        f"📢 **{tag}** {base_title}\n"
+        f"게시일: {item['date'] or '미표기'}\n"
         f"🔗 {item['url']}"
     )
-    # 간단한 rate-limit 대응 (Webhook는 보통 5req/2s)
+
     r = requests.post(WEBHOOK_URL, json={"content": content}, timeout=TIMEOUT)
     if r.status_code == 429:
         retry_after = r.json().get("retry_after", 2)
