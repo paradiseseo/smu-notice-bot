@@ -73,44 +73,83 @@ def match_keywords(title: str) -> bool:
 
 def fetch_list_items():
     """
-    통합공지 목록 파싱.
-    사이트 마크업 변화에 대비하여 다중 셀렉터 시도.
+    상명대 통합공지: 다양한 마크업/경로를 가정하고 3단계로 긁음.
     반환: [{id, title, url, date}]
     """
+    from bs4 import BeautifulSoup
+    import re
+    from urllib.parse import urljoin, urlparse, parse_qs
+
     resp = http_get(LIST_URL)
     resp.raise_for_status()
-    soup = BeautifulSoup(resp.text, "html.parser")
-
+    html = resp.text
+    print("[DEBUG] HTML head snippet:", html[:800].replace("\n"," ")[:800])
+    soup = BeautifulSoup(html, "html.parser")
     items = []
 
-    # 1) 테이블 형태
-    rows = soup.select("table.board-list tbody tr")
+    BASE_PATHS = [
+        "/kor/life/notice.do",         # 현재 우리가 보는 목록/상세 공통 경로
+        "/kor/life/noticeView.do",     # 대체 상세 경로 가능성
+        "/kor/life/notice.jsp",        # 레거시 가능성
+    ]
+
+    def mk_id(href):
+        # ?articleNo= / ?no= / ?bbsNo= 등 공통 파라미터 우선
+        try:
+            qs = parse_qs(urlparse(href).query)
+            for k in ("articleNo", "no", "bbsNo", "nttNo"):
+                if k in qs and qs[k]:
+                    return f"{k}:{qs[k][0]}"
+        except Exception:
+            pass
+        return "hash:" + hashlib.sha1(href.encode("utf-8")).hexdigest()[:16]
+
+    # --- 전략 A: 테이블 기반 (가장 흔함)
+    rows = soup.select("table tbody tr")
     for r in rows:
-        a = r.select_one("a")
-        if not a:
+        a = r.select_one("a[href]")
+        if not a: 
+            continue
+        href = urljoin(BASE, a.get("href"))
+        if not any(path in href for path in BASE_PATHS):
             continue
         title = a.get_text(strip=True)
-        href = urljoin(BASE, a.get("href", ""))
-        date_el = r.select_one(".date") or r.select_one("td:nth-last-child(1)")
+        date_el = r.select_one(".date, td:nth-last-child(1), time")
         date_text = date_el.get_text(strip=True) if date_el else ""
-        nid = extract_id_from_url(href)
-        items.append({"id": nid, "title": title, "url": href, "date": date_text})
+        items.append({"id": mk_id(href), "title": title, "url": href, "date": date_text})
 
-    # 2) 카드/리스트 형태(백업 셀렉터)
-    if not items:
-        lis = soup.select("ul.board-list > li, div.board-list .board-item")
-        for li in lis:
-            a = li.select_one("a")
-            if not a:
+    if items:
+        return items
+
+    # --- 전략 B: 카드/리스트형 (ul/li, div.list)
+    for sel in ["ul li a[href]", ".board-list a[href]", ".list a[href]", "a[href]"]:
+        for a in soup.select(sel):
+            href = urljoin(BASE, a.get("href"))
+            if not any(path in href for path in BASE_PATHS):
                 continue
             title = a.get_text(strip=True)
-            href = urljoin(BASE, a.get("href", ""))
-            date_el = li.select_one(".date, .regdate, time")
+            if not title:
+                continue
+            # 주변에서 날짜 힌트 찾기
+            parent = a.find_parent(["li","div","tr"]) or a.parent
+            date_el = (parent.select_one(".date, .regdate, time") if parent else None)
             date_text = date_el.get_text(strip=True) if date_el else ""
-            nid = extract_id_from_url(href)
-            items.append({"id": nid, "title": title, "url": href, "date": date_text})
+            items.append({"id": mk_id(href), "title": title, "url": href, "date": date_text})
+
+    if items:
+        return items
+
+    # --- 전략 C: HTML 안의 href를 정규식으로 직접 수집(최후수단)
+    hrefs = re.findall(r'href=["\']([^"\']+)["\']', html, flags=re.I)
+    for h in hrefs:
+        full = urljoin(BASE, h)
+        if any(path in full for path in BASE_PATHS):
+            # 앵커 텍스트를 못 얻으면 URL에서 타이틀 대체
+            title = full.split("title=")[-1] if "title=" in full else full
+            items.append({"id": mk_id(full), "title": title, "url": full, "date": ""})
 
     return items
+
 
 def send_discord(item):
     tag = guess_category(item["title"])
@@ -132,14 +171,20 @@ def send_discord(item):
 print(f"[DEBUG] Parsing list from: {LIST_URL}")
 def main():
     seen = load_seen()
+
+    # [1] 지금 파싱 중인 URL 표시
+    print(f"[DEBUG] Parsing list from: {LIST_URL}")
+
+    # [2] 실제 HTML 파싱 후 몇 개 항목을 찾았는지 표시
     items = fetch_list_items()
     print(f"[DEBUG] Fetched items: {len(items)}")
 
-    # 최신글이 위에 있다고 가정 → 뒤에서 앞으로 보내면 오래된 것부터 전송됨
     items = list(items)
 
+    # [3] '새 공지'로 분류된 항목 개수 표시
     new_items = [it for it in items if it["id"] not in seen and match_keywords(it["title"])]
     print(f"[DEBUG] New items: {len(new_items)} (seen={len(seen)})")
+
     if not new_items:
         print("새 공지 없음")
         return
