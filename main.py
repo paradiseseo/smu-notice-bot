@@ -81,10 +81,11 @@ def match_keywords(title: str) -> bool:
 
 def fetch_list_items():
     """
-    상명대 통합공지 전용 파서:
-    - 실제 게시글 링크만: /kor/life/notice.do?mode=view&articleNo=...
-    - 내비/목록 루트 링크(통합공지/대학생활)는 자동 배제
-    - 날짜는 같은 행(tr)/인접 블록에서 yyyy.mm.dd 패턴 탐색
+    상명대 통합공지 전용 파서(강화판)
+    - 제목 a 태그의 href 또는 onclick에서 articleNo를 추출
+    - href=...mode=view&articleNo=... 이면 그대로 사용
+    - href="#" 이고 onclick="fnView('760387')" 등인 경우 숫자 추출 후 URL 구성
+    - 날짜는 같은 tr/인접 블록에서 yyyy.mm.dd, yyyy-mm-dd, yyyy/mm/dd 패턴 탐색
     반환: [{id, title, url, date}]
     """
     import re
@@ -97,92 +98,91 @@ def fetch_list_items():
     soup = BeautifulSoup(html, "html.parser")
 
     items = []
-    date_pat = re.compile(r"\d{4}[.\-\/]\d{1,2}[.\-\/]\d{1,2}")
+    date_pat = re.compile(r"\d{4}[.\-/]\d{1,2}[.\-/]\d{1,2}")
 
-    def is_notice_view_href(href: str) -> bool:
+    def extract_article_no_from_href(href: str):
         if not href:
-            return False
-        full = urljoin(BASE, href)
-        # 목록 루트는 제외
-        if full.split("?")[0].rstrip("/") == LIST_URL.rstrip("/"):
-            return False
-        # 반드시 mode=view & articleNo= 포함
-        if ("/kor/life/notice.do" in full) and ("mode=view" in full) and ("articleNo=" in full):
-            return True
-        return False
-
-    def extract_article_no(href: str) -> str:
+            return None
         qs = parse_qs(urlparse(urljoin(BASE, href)).query)
         if "articleNo" in qs and qs["articleNo"]:
             return qs["articleNo"][0]
         return None
 
-    # 1) a[href*="notice.do"][href*="mode=view"][href*="articleNo="] 만 수집
-    anchors = soup.select('a[href*="notice.do"][href*="mode=view"][href*="articleNo="]')
+    def extract_article_no_from_onclick(attr: str):
+        if not attr:
+            return None
+        # fnView('760387') / goView(760387) / view( '760387' ) 등 숫자 6자리 이상
+        m = re.search(r"(?<!\d)(\d{5,})(?!\d)", attr)
+        return m.group(1) if m else None
+
+    def build_view_url(article_no: str):
+        # 목록에서 쓰던 기본 파라미터는 없어도 상세는 열립니다. 최소 구성으로 생성
+        return f"{LIST_URL}?mode=view&articleNo={article_no}"
+
+    # 제목이 들어있는 앵커 후보 넓게 수집 (게시판 영역 우선)
+    # 테이블/리스트 모두 커버: 제목 텍스트가 2글자 이상인 a 태그
+    anchors = soup.select("table a[href], table a[onclick], .board-list a, a")
     for a in anchors:
-        href = a.get("href", "")
-        if not is_notice_view_href(href):
+        title = a.get_text(strip=True)
+        if not title or len(title) < 2:
             continue
 
-        full = urljoin(BASE, href)
-        art_no = extract_article_no(href)
+        href = a.get("href") or ""
+        onclick = a.get("onclick") or ""
+
+        # 1) href에서 articleNo 추출
+        art_no = extract_article_no_from_href(href)
+
+        # 2) href가 없거나 '#'이고, onclick에 숫자가 있으면 추출
+        if not art_no and (href in ("", "#", "javascript:void(0)", "javascript:;") or "mode=view" not in href):
+            art_no = extract_article_no_from_onclick(onclick)
+
+        # articleNo가 없으면 게시글로 보지 않음
         if not art_no:
-            continue  # articleNo가 없는 경우 스킵
+            continue
 
-        # 제목 추출
-        title = a.get_text(strip=True)
+        full = build_view_url(art_no)
 
-        # 게시판이 테이블이면 같은 tr에서 날짜 찾기
+        # 날짜 추출: 같은 tr 우선, 없으면 부모 블록들에서 검색
         date_text = ""
         tr = a.find_parent("tr")
         if tr:
-            # 뒤쪽 td부터 날짜 형태 탐색
             for td in reversed(tr.find_all("td")):
                 txt = td.get_text(" ", strip=True)
                 m = date_pat.search(txt)
                 if m:
                     date_text = m.group(0)
                     break
-
-        # 리스트/카드형이면 주변에서 날짜 후보 찾기
         if not date_text:
-            parent = a.find_parent(["li", "div"]) or a.parent
+            parent = a.find_parent(["li", "div", "article", "section"]) or a.parent
             if parent:
-                # class로 흔히 쓰이는 것들
                 cand = parent.select_one(".date, .regdate, time")
                 if cand:
                     date_text = cand.get_text(strip=True)
                 else:
-                    # 텍스트에서 패턴 탐색
                     m = date_pat.search(parent.get_text(" ", strip=True))
                     if m:
                         date_text = m.group(0)
 
         items.append({
             "id": f"articleNo:{art_no}",
-            "title": title if title else f"articleNo {art_no}",
+            "title": title,
             "url": full,
             "date": date_text
         })
 
-    # 중복 제거(같은 articleNo는 하나만)
+    # 메뉴/중복 제거: articleNo 기준으로 dedup
     dedup = {}
     for it in items:
+        # 목록 루트(자기 자신)나 메뉴 텍스트(대학생활/통합공지) 필터
+        if it["url"].split("?")[0].rstrip("/") == LIST_URL.rstrip("/"):
+            continue
+        if it["title"] in ("대학생활", "통합공지"):
+            continue
         dedup[it["id"]] = it
 
-    # 원래 목록 순서 보장: anchors 순회 순서 유지
-    ordered = []
-    seen_ids = set()
-    for a in anchors:
-        href = a.get("href", "")
-        art_no = extract_article_no(href)
-        if not art_no:
-            continue
-        key = f"articleNo:{art_no}"
-        if key in dedup and key not in seen_ids:
-            ordered.append(dedup[key])
-            seen_ids.add(key)
-
+    # 원래 화면 순서 근사 유지
+    ordered = list(dedup.values())
     return ordered
 
 def send_discord(item):
