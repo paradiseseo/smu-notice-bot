@@ -1,7 +1,7 @@
 name: smu-notice-bot
 on:
   schedule:
-    - cron: "*/20 * * * *"
+    - cron: "0 * * * *"
   workflow_dispatch: {}
 jobs:
   run:
