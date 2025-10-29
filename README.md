@@ -1,7 +1,7 @@
 
 # SMU Notice Discord Bot (MVP)
 
-상명대학교 통합공지 페이지(https://www.smu.ac.kr/kor/life/notice.do)의 새 공지를 60분 간격으로 감지해 디스코드 채널에 Webhook으로 전송하는 봇입니다.
+상명대학교 통합공지 페이지(https://www.smu.ac.kr/kor/life/notice.do) 의 새 공지를 60분 간격으로 감지해 디스코드 채널에 Webhook으로 전송하는 봇입니다.
 
 ## 빠른 시작 (GitHub 웹만 사용)
 
